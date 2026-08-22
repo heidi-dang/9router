@@ -230,8 +230,6 @@ function getContentBlocksFromMessage(msg, toolNameMap = new Map()) {
             ? { type: CLAUDE_BLOCK.IMAGE, source: { type: "base64", media_type: parsed.mimeType, data: parsed.base64 } }
             : { type: CLAUDE_BLOCK.IMAGE, source: { type: "url", url: part.image_url.url } });
         } else if (part.type === OPENAI_BLOCK.TOOL_USE) {
-          blocks.push({ type: CLAUDE_BLOCK.TEXT, text: part.text });
-        } else if (part.type === CLAUDE_BLOCK.TOOL_USE) {
           // Tool name already has prefix from tool declarations, keep as-is
           blocks.push({ type: CLAUDE_BLOCK.TOOL_USE, id: part.id, name: part.name, input: part.input });
         } else if (part.type === CLAUDE_BLOCK.THINKING) {
