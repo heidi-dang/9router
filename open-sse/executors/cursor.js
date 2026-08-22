@@ -7,7 +7,8 @@ import {
   wrapConnectRPCFrame,
   decodeMessage,
   parseConnectRPCFrame,
-  extractTextFromResponse
+  extractTextFromResponse,
+  encodeMcpToolDefinition
 } from "../utils/cursorProtobuf.js";
 import { buildCursorHeaders } from "../utils/cursorChecksum.js";
 import { estimateUsage } from "../utils/usageTracking.js";
@@ -70,6 +71,16 @@ function textFromContent(content) {
     .join("\n");
 }
 
+export function isAgentCapableRequest(body) {
+  if (!body || !Array.isArray(body.messages) || body.messages.length === 0) return false;
+  return body.messages.every((message) => {
+    if (!message || typeof message !== "object") return false;
+    if (message.role === "tool") return typeof message.content === "string" || Array.isArray(message.content);
+    if (Array.isArray(message.tool_calls)) return true;
+    return typeof message.content === "string" || Array.isArray(message.content) && message.content.every((part) => part?.type === "text");
+  });
+}
+
 function isAgentTextRequest(body) {
   // Many compatible clients always attach their built-in tool schemas, even
   // for a normal text turn. Cursor's retired ChatService rejects those
@@ -95,7 +106,7 @@ function encodeHistoryMessage(message) {
   return agentMessage(1, agentMessage(1, agentMessage(1, text)));
 }
 
-function buildAgentRunFrame(messages, model) {
+export function buildAgentRunFrame(messages, model, tools = []) {
   const system = messages
     .filter((message) => message?.role === "system")
     .map((message) => textFromContent(message.content))
@@ -124,11 +135,13 @@ function buildAgentRunFrame(messages, model) {
   );
   const conversationAction = agentMessage(1, userAction);
   const requestedModel = concatBuffers(agentString(1, model), agentBool(7, true));
+  const mcpTools = tools?.length ? concatBuffers(...tools.map((tool) => agentMessage(1, encodeMcpToolDefinition(tool)))) : null;
   const runRequest = concatBuffers(
     // An empty ConversationStateStructure starts a fresh local agent session.
     agentMessage(1, new Uint8Array()),
     agentMessage(2, conversationAction),
     ...(system ? [agentString(8, system)] : []),
+    ...(mcpTools ? [agentMessage(4, mcpTools)] : []),
     agentMessage(9, requestedModel),
   );
 

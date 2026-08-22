@@ -208,14 +208,21 @@ export function encodeField(fieldNum, wireType, value) {
   }
 
   if (wireType === WIRE_TYPE.LEN) {
-    const dataBytes = typeof value === "string" 
+    const dataBytes = typeof value === "string"
       ? new TextEncoder().encode(value)
       : value instanceof Uint8Array ? value
       : Buffer.isBuffer(value) ? new Uint8Array(value)
       : new Uint8Array(0);
-    
     const lengthBytes = encodeVarint(dataBytes.length);
     return concatArrays(tagBytes, lengthBytes, dataBytes);
+  }
+
+  if (wireType === WIRE_TYPE.FIXED64 || wireType === WIRE_TYPE.FIXED32) {
+    const dataBytes = value instanceof Uint8Array || Buffer.isBuffer(value)
+      ? new Uint8Array(value)
+      : new Uint8Array(0);
+    const width = wireType === WIRE_TYPE.FIXED64 ? 8 : 4;
+    return concatArrays(tagBytes, dataBytes.slice(0, width));
   }
 
   return new Uint8Array(0);
@@ -886,6 +893,82 @@ export function extractTextFromResponse(payload) {
     };
   }
 }
+
+// ==================== AgentService codec helpers ====================
+
+function encodeAgentValue(value) {
+  if (value === null || value === undefined) return encodeField(1, WIRE_TYPE.LEN, new Uint8Array());
+  if (typeof value === "boolean") return encodeField(4, WIRE_TYPE.VARINT, value ? 1 : 0);
+  if (typeof value === "string") return encodeField(3, WIRE_TYPE.LEN, value);
+  if (typeof value === "number") return encodeField(2, WIRE_TYPE.FIXED64, new Uint8Array(new Float64Array([value]).buffer));
+  if (Array.isArray(value)) {
+    return encodeField(6, WIRE_TYPE.LEN, concatArrays(...value.map((item) => encodeField(1, WIRE_TYPE.LEN, encodeAgentValue(item)))));
+  }
+  if (typeof value === "object") {
+    const entries = Object.entries(value).map(([key, item]) => encodeField(1, WIRE_TYPE.LEN, concatArrays(
+      encodeField(1, WIRE_TYPE.LEN, key),
+      encodeField(2, WIRE_TYPE.LEN, encodeAgentValue(item)),
+    )));
+    return encodeField(5, WIRE_TYPE.LEN, concatArrays(...entries));
+  }
+  return encodeField(3, WIRE_TYPE.LEN, String(value));
+}
+
+function decodeAgentValue(data) {
+  const fields = decodeMessage(Buffer.from(data || []));
+  if (fields.has(1)) return null;
+  if (fields.has(4)) return fields.get(4)[0].value !== 0;
+  if (fields.has(3)) return Buffer.from(fields.get(3)[0].value).toString("utf8");
+  if (fields.has(2)) {
+    const bytes = Buffer.from(fields.get(2)[0].value);
+    return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getFloat64(0, true);
+  }
+  if (fields.has(6)) return fields.get(6)[0].value.length ? decodeMessage(fields.get(6)[0].value).get(1).map((entry) => decodeAgentValue(entry.value)) : [];
+  if (fields.has(5)) {
+    const result = {};
+    for (const entry of fields.get(5)[0].value.length ? decodeMessage(fields.get(5)[0].value).get(1) || [] : []) {
+      const pair = decodeMessage(entry.value);
+      const key = Buffer.from(pair.get(1)[0].value).toString("utf8");
+      result[key] = decodeAgentValue(pair.get(2)[0].value);
+    }
+    return result;
+  }
+  return null;
+}
+
+function encodeMcpToolDefinition(tool) {
+  const fn = tool?.function || tool || {};
+  const name = fn.name || tool?.name || "tool";
+  const description = fn.description || tool?.description || "";
+  const schema = fn.parameters || tool?.input_schema || tool?.inputSchema || {};
+  return concatArrays(
+    encodeField(1, WIRE_TYPE.LEN, name), encodeField(2, WIRE_TYPE.LEN, description),
+    encodeField(3, WIRE_TYPE.LEN, encodeAgentValue(schema)), encodeField(4, WIRE_TYPE.LEN, "9router"),
+    encodeField(5, WIRE_TYPE.LEN, name),
+  );
+}
+
+function encodeMcpTools(tools = []) {
+  return tools.length ? concatArrays(...tools.map((tool) => encodeField(1, WIRE_TYPE.LEN, encodeMcpToolDefinition(tool)))) : new Uint8Array();
+}
+
+function encodeMcpResultSuccess({ textItems = [], imageItems = [], isError = false } = {}) {
+  const items = [
+    ...textItems.map((text) => encodeField(1, WIRE_TYPE.LEN, encodeField(1, WIRE_TYPE.LEN, encodeField(1, WIRE_TYPE.LEN, text)))),
+    ...imageItems.map((image) => encodeField(1, WIRE_TYPE.LEN, encodeField(2, WIRE_TYPE.LEN, concatArrays(encodeField(1, WIRE_TYPE.LEN, image.data), encodeField(2, WIRE_TYPE.LEN, image.mimeType))))),
+  ];
+  return encodeField(1, WIRE_TYPE.LEN, concatArrays(...items, encodeField(2, WIRE_TYPE.VARINT, isError ? 1 : 0)));
+}
+function encodeMcpResultError(message) { return encodeField(2, WIRE_TYPE.LEN, encodeField(1, WIRE_TYPE.LEN, message)); }
+function encodeMcpResultToolNotFound(name) { return encodeField(5, WIRE_TYPE.LEN, encodeField(1, WIRE_TYPE.LEN, name)); }
+function decodeMcpArgs(data) {
+  const fields = decodeMessage(Buffer.from(data || []));
+  const args = {};
+  for (const item of fields.get(2) || []) { const pair = decodeMessage(item.value); const key = Buffer.from(pair.get(1)[0].value).toString("utf8"); args[key] = decodeAgentValue(pair.get(2)[0].value); }
+  return { name: Buffer.from(fields.get(1)?.[0]?.value || []).toString("utf8"), toolName: Buffer.from(fields.get(5)?.[0]?.value || []).toString("utf8"), toolCallId: Buffer.from(fields.get(3)?.[0]?.value || []).toString("utf8"), args };
+}
+
+export { encodeAgentValue, decodeAgentValue, encodeMcpToolDefinition, encodeMcpTools, decodeMcpArgs, encodeMcpResultSuccess, encodeMcpResultError, encodeMcpResultToolNotFound };
 
 // ==================== EXPORTS ====================
 
