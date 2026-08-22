@@ -12,7 +12,9 @@ export function extractCooldownMs(headers, body = "", now = Date.now()) {
   const get = (name) => headers?.get?.(name) ?? headers?.[name] ?? headers?.[name.toLowerCase()];
   for (const name of ["retry-after", "x-ratelimit-reset-after", "x-quota-reset-after", "x-ratelimit-reset"]) { const at = parseResetAt(get(name), now); if (at) return Math.max(0, at - now); }
   const match = String(body).match(/reset(?:s| after)?[^\d]*(\d+h)?\s*(\d+m)?\s*(\d+s)?/i);
-  return match ? parseResetAt(`${match[1] || ""}${match[2] || ""}${match[3] || ""}`, now) - now : null;
+  if (!match || !(match[1] || match[2] || match[3])) return null;
+  const resetAt = parseResetAt(`${match[1] || ""}${match[2] || ""}${match[3] || ""}`, now);
+  return resetAt == null ? null : Math.max(0, resetAt - now);
 }
 export function setCooldown({ credentialId, model, until, reason = "quota" }) { const key = keyOf(credentialId, model); const value = typeof until === "number" ? until : Date.parse(until); cooldowns.set(key, { until: value, reason }); return cooldowns.get(key); }
 export function getCooldown(credentialId, model, now = Date.now()) { const entries = [cooldowns.get(keyOf(credentialId, model)), cooldowns.get(keyOf(credentialId, null))].filter(Boolean); const active = entries.filter(x => x.until > now).sort((a,b) => b.until-a.until)[0]; if (!active) { cooldowns.delete(keyOf(credentialId, model)); return null; } return active; }
