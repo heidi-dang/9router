@@ -1347,6 +1347,29 @@ exports[`GOLDEN buildHeaders (default executor providers) > volcengine-ark → h
 }
 `;
 
+exports[`GOLDEN buildHeaders (default executor providers) > windsurf → headers (apiKey / oauth) 1`] = `
+{
+  "apiKey": {
+    "Accept": "text/event-stream",
+    "Authorization": "<CRED>",
+    "Content-Type": "application/grpc-web+proto",
+    "X-Grpc-Web": "1",
+  },
+  "nonStream": {
+    "Accept": "application/grpc-web+proto",
+    "Authorization": "<CRED>",
+    "Content-Type": "application/grpc-web+proto",
+    "X-Grpc-Web": "1",
+  },
+  "oauth": {
+    "Accept": "text/event-stream",
+    "Authorization": "<CRED>",
+    "Content-Type": "application/grpc-web+proto",
+    "X-Grpc-Web": "1",
+  },
+}
+`;
+
 exports[`GOLDEN buildHeaders (default executor providers) > xai → headers (apiKey / oauth) 1`] = `
 {
   "apiKey": {
@@ -1824,6 +1847,13 @@ exports[`GOLDEN buildUrl (default executor providers) > volcengine-ark → url (
 {
   "nonStream": "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",
   "stream": "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",
+}
+`;
+
+exports[`GOLDEN buildUrl (default executor providers) > windsurf → url (stream + non-stream) 1`] = `
+{
+  "nonStream": "https://server.self-serve.windsurf.com/exa.language_server_pb.LanguageServerService/GetChatMessage",
+  "stream": "https://server.self-serve.windsurf.com/exa.language_server_pb.LanguageServerService/GetChatMessage",
 }
 `;
 

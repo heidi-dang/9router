@@ -113,7 +113,7 @@ import p111 from "./sambanova.js";
 import p112 from "./tencent.js";
 import p113 from "./morph.js";
 // import p114 from "./devin-cli.js";
-// import p104 from "./windsurf.js";
+import p104 from "./windsurf.js";
 import p115 from "./poolside.js";
 import p116 from "./tokenrouter.js";
 import p117 from "./selfhosted-stt.js";
@@ -235,7 +235,7 @@ export default [
   p112,
   p113,
   // p114, // devin-cli — hidden, spawns local agent with shell/fs access
-  // p104, // windsurf — hidden, no tool calling
+  p104,
   p115,
   p116,
   p117,

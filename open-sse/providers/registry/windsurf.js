@@ -19,7 +19,7 @@ export default {
   authModes: ["oauth", "apikey"],
 
   transport: {
-    baseUrl: "https://server.codeium.com/exa.language_server_pb.LanguageServerService/GetChatMessage",
+    baseUrl: "https://server.self-serve.windsurf.com/exa.language_server_pb.LanguageServerService/GetChatMessage",
     format: "openai",
     headers: {
       "Content-Type": "application/grpc-web+proto",

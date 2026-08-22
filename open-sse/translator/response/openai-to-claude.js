@@ -213,9 +213,25 @@ export function openaiToClaudeResponse(chunk, state) {
       if (tc.function?.arguments) {
         const toolInfo = state.toolCalls.get(idx);
         if (toolInfo) {
-          // Buffer args instead of streaming — sanitize at finish to fix bad params
+          // Keep buffering for fragmented arguments, but emit complete JSON chunks
+          // immediately so non-streaming tool-call payloads are not lost when the
+          // provider omits a separate finish chunk.
           if (!state.toolArgBuffers) state.toolArgBuffers = new Map();
-          state.toolArgBuffers.set(idx, (state.toolArgBuffers.get(idx) || "") + tc.function.arguments);
+          const buffered = (state.toolArgBuffers.get(idx) || "") + tc.function.arguments;
+          state.toolArgBuffers.set(idx, buffered);
+          try {
+            JSON.parse(buffered);
+            const sanitized = sanitizeToolArgs(toolInfo.name, buffered);
+            results.push({
+              type: "content_block_delta",
+              index: toolInfo.blockIndex,
+              delta: { type: "input_json_delta", partial_json: sanitized }
+            });
+            if (!state.toolArgsEmitted) state.toolArgsEmitted = new Set();
+            state.toolArgsEmitted.add(idx);
+          } catch {
+            // Wait for the remaining argument fragments.
+          }
         }
       }
     }

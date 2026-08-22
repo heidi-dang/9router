@@ -84,6 +84,7 @@ describe("quota auto-ping", () => {
     vi.resetModules();
     vi.clearAllMocks();
     vi.useRealTimers();
+    vi.useFakeTimers();
     delete global.__quotaAutoPing;
 
     ({ getCodexUsage } = await import("open-sse/services/usage/codex.js"));

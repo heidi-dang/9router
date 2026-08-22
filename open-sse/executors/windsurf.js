@@ -12,7 +12,7 @@ import { randomUUID } from "node:crypto";
 // Auth: credentials.accessToken = Codeium apiKey (sk-ws-... or Firebase-derived)
 //       — placed in Metadata.api_key protobuf field of every request + Bearer header.
 
-const WS_BASE_URL = "https://server.codeium.com";
+const WS_BASE_URL = "https://server.self-serve.windsurf.com";
 const WS_SERVICE = "exa.language_server_pb.LanguageServerService";
 const WS_METHOD_CHAT = "GetChatMessage";
 const WS_CHAT_URL = `${WS_BASE_URL}/${WS_SERVICE}/${WS_METHOD_CHAT}`;
