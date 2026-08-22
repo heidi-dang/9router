@@ -7,6 +7,11 @@ import { resolveSessionId } from "../utils/sessionManager.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { cleanJSONSchemaForAntigravity } from "../translator/formats/gemini.js";
 import { DEFAULT_THINKING_AG_SIGNATURE } from "../config/defaultThinkingSignature.js";
+import { normalizeAntigravityTools } from "../antigravity/tools.js";
+import { classifyAntigravityError } from "../antigravity/errors.js";
+import { extractCooldownMs } from "../antigravity/quota.js";
+
+const refreshFlights = new Map();
 
 // Sanitize function name: Gemini requires [a-zA-Z_][a-zA-Z0-9_.:\-]{0,63}
 function sanitizeFunctionName(name) {
@@ -134,7 +139,10 @@ export class AntigravityExecutor extends BaseExecutor {
   }
 
   transformRequest(model, body, stream, credentials) {
-    const projectId = credentials?.projectId || this.generateProjectId();
+    const projectId = credentials?.projectId;
+    if (!projectId) {
+      throw classifyAntigravityError(400, "Antigravity requires a validated project ID", { code: "PROJECT_REQUIRED" });
+    }
 
     // OpenAI clients may include stream_options even for non-streaming calls.
     // Google generateContent rejects that combination before processing the request.
@@ -222,24 +230,7 @@ export class AntigravityExecutor extends BaseExecutor {
     let tools = body.request?.tools;
 
     if (tools && tools.length > 0) {
-      // Merge all groups into a single functionDeclarations group (Gemini expects 1 group)
-      const seenToolNames = new Set();
-      const allDeclarations = [];
-      for (const group of tools) {
-        for (const fn of group.functionDeclarations || []) {
-          const name = sanitizeFunctionName(fn.name);
-          if (seenToolNames.has(name)) continue;
-          seenToolNames.add(name);
-          allDeclarations.push({
-            ...fn,
-            name,
-            parameters: fn.parameters
-              ? cleanJSONSchemaForAntigravity(structuredClone(fn.parameters))
-              : { type: "object", properties: { reason: { type: "string", description: "Brief explanation" } }, required: ["reason"] }
-          });
-        }
-      }
-      tools = allDeclarations.length > 0 ? [{ functionDeclarations: allDeclarations }] : [];
+      tools = normalizeAntigravityTools(tools);
     }
 
     // Strip tools/toolConfig (handled separately) and blacklisted fields that Google rejects
@@ -290,34 +281,26 @@ export class AntigravityExecutor extends BaseExecutor {
 
   async refreshCredentials(credentials, log, proxyOptions = null) {
     if (!credentials.refreshToken) return null;
-
-    try {
-      const response = await proxyAwareFetch(OAUTH_ENDPOINTS.google.token, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json" },
-        body: new URLSearchParams({
-          grant_type: "refresh_token",
-          refresh_token: credentials.refreshToken,
-          client_id: this.config.clientId,
-          client_secret: this.config.clientSecret
-        })
-      }, proxyOptions);
-
-      if (!response.ok) return null;
-
-      const tokens = await response.json();
-      log?.info?.("TOKEN", "Antigravity refreshed");
-
-      return {
-        accessToken: tokens.access_token,
-        refreshToken: tokens.refresh_token || credentials.refreshToken,
-        expiresIn: tokens.expires_in,
-        projectId: credentials.projectId
-      };
-    } catch (error) {
-      log?.error?.("TOKEN", `Antigravity refresh error: ${error.message}`);
-      return null;
-    }
+    const identity = credentials.connectionId || credentials.email || credentials.refreshToken.slice(-16);
+    if (refreshFlights.has(identity)) return refreshFlights.get(identity);
+    const refreshPromise = (async () => {
+      try {
+        const response = await proxyAwareFetch(OAUTH_ENDPOINTS.google.token, {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json" },
+          body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: credentials.refreshToken, client_id: this.config.clientId, client_secret: this.config.clientSecret })
+        }, proxyOptions);
+        if (!response.ok) return null;
+        const tokens = await response.json();
+        log?.info?.("TOKEN", "Antigravity refreshed");
+        return { accessToken: tokens.access_token, refreshToken: tokens.refresh_token || credentials.refreshToken, expiresIn: tokens.expires_in, projectId: credentials.projectId };
+      } catch (error) {
+        log?.error?.("TOKEN", `Antigravity refresh error: ${error.message}`);
+        return null;
+      }
+    })();
+    refreshFlights.set(identity, refreshPromise);
+    try { return await refreshPromise; } finally { refreshFlights.delete(identity); }
   }
 
   generateProjectId() {
