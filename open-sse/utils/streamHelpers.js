@@ -4,17 +4,15 @@ import { FORMATS } from "../translator/formats.js";
 export function parseSSELine(line, format = null) {
   if (!line) return null;
 
-  // NDJSON format (Ollama): raw JSON lines without "data:" prefix
-  if (format === FORMATS.OLLAMA) {
-    const trimmed = line.trim();
-    if (trimmed.startsWith("{")) {
-      try {
-        return JSON.parse(trimmed);
-      } catch (error) {
-        return null;
-      }
+  // NDJSON providers may omit the format hint; accept raw JSON whenever the
+  // line is a complete object, while retaining the format-specific fast path.
+  const trimmed = line.trim();
+  if (trimmed.startsWith("{")) {
+    try {
+      return JSON.parse(trimmed);
+    } catch (error) {
+      if (format === FORMATS.OLLAMA) return null;
     }
-    return null;
   }
 
   // Standard SSE format: "data: {...}"

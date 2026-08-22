@@ -207,53 +207,20 @@ function getContentBlocksFromMessage(msg, toolNameMap = new Map()) {
       tool_use_id: msg.tool_call_id,
       content: msg.content
     });
-  } else if (msg.role === ROLE.USER) {
-    if (typeof msg.content === "string") {
-      if (msg.content) {
-        blocks.push({ type: CLAUDE_BLOCK.TEXT, text: msg.content });
-      }
-    } else if (Array.isArray(msg.content)) {
-      for (const part of msg.content) {
-        if (part.type === OPENAI_BLOCK.TEXT && part.text) {
-          blocks.push({ type: CLAUDE_BLOCK.TEXT, text: part.text });
-        } else if (part.type === CLAUDE_BLOCK.TOOL_RESULT) {
-          blocks.push({
-            type: CLAUDE_BLOCK.TOOL_RESULT,
-            tool_use_id: part.tool_use_id,
-            content: part.content,
-            ...(part.is_error && { is_error: part.is_error })
-          });
-        } else if (part.type === OPENAI_BLOCK.IMAGE_URL) {
-          const url = part.image_url.url;
-          const parsed = parseDataUri(url);
-          if (parsed) {
-            blocks.push({
-              type: CLAUDE_BLOCK.IMAGE,
-              source: { type: "base64", media_type: parsed.mimeType, data: parsed.base64 }
-            });
-          } else if (url.startsWith("http://") || url.startsWith("https://")) {
-            blocks.push({
-              type: CLAUDE_BLOCK.IMAGE,
-              source: { type: "url", url }
-            });
-          }
-        } else if (part.type === OPENAI_BLOCK.IMAGE && part.source) {
-          blocks.push({ type: CLAUDE_BLOCK.IMAGE, source: part.source });
-        } else if (part.type === OPENAI_BLOCK.FILE && part.file) {
-          // OpenAI file block -> Claude document (PDF only; Claude rejects other mimes).
-          const fileData = part.file.file_data;
-          const parsed = parseDataUri(fileData);
-          if (parsed && parsed.mimeType === "application/pdf") {
-            blocks.push({
-              type: CLAUDE_BLOCK.DOCUMENT,
-              source: { type: "base64", media_type: parsed.mimeType, data: parsed.base64 }
-            });
-          }
-        }
-      }
-    }
-  } else if (msg.role === ROLE.ASSISTANT) {
-    if (Array.isArray(msg.content)) {
+    return blocks;
+  }
+
+  // OpenAI-compatible clients commonly carry hidden reasoning separately from
+  // visible content. Preserve it as Claude thinking content instead of losing
+  // it during the format conversion.
+  if (typeof msg.reasoning_content === "string" && msg.reasoning_content.length > 0) {
+    blocks.push({
+      type: CLAUDE_BLOCK.THINKING,
+      thinking: msg.reasoning_content
+    });
+  }
+
+  if (Array.isArray(msg.content)) {
       for (const part of msg.content) {
         if (part.type === OPENAI_BLOCK.TEXT && part.text) {
           blocks.push({ type: CLAUDE_BLOCK.TEXT, text: part.text });
@@ -287,7 +254,6 @@ function getContentBlocksFromMessage(msg, toolNameMap = new Map()) {
         }
       }
     }
-  }
 
   return blocks;
 }

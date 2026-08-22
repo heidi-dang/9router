@@ -49,12 +49,15 @@ export function filterToOpenAIFormat(body, opts = {}) {
         }
       }
       
-      // If all content was filtered, add empty text
+      // If all content was filtered, add empty text. Collapse text-only arrays
+      // so OpenAI-compatible providers receive the canonical string form.
       if (filteredContent.length === 0) {
         filteredContent.push({ type: OPENAI_BLOCK.TEXT, text: "" });
       }
-      
-      return { ...msg, content: filteredContent };
+      const content = filteredContent.every((block) => block.type === OPENAI_BLOCK.TEXT)
+        ? filteredContent.map((block) => block.text || "").join("\n")
+        : filteredContent;
+      return { ...msg, content };
     }
     
     return msg;
