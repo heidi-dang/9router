@@ -29,9 +29,12 @@ async function getObservabilityConfig() {
       return cachedConfig;
     }
     const envFallback = process.env.OBSERVABILITY_ENABLED !== "false";
-    const uiFlag = typeof settings.enableObservability === "boolean";
+    const configuredFlag = typeof settings.enableObservability2 === "boolean"
+      ? settings.enableObservability2
+      : settings.enableObservability;
+    const uiFlag = typeof configuredFlag === "boolean";
     const enabled = uiFlag
-      ? settings.enableObservability
+      ? configuredFlag
       : envFallback;
 
     cachedConfig = {

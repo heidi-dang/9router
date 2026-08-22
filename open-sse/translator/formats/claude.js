@@ -127,38 +127,31 @@ export function normalizeClaudePassthrough(body, model = "") {
     if (Object.keys(body.output_config).length === 0) delete body.output_config;
   }
 
-  // 2. Fold mid-conversation system messages into the neighbouring turn.
-  // Hoisting them into body.system would insert volatile content (token counters,
-  // reminders) ahead of the whole conversation and invalidate the prefix cache on
-  // every request. Folding in place keeps the cached prefix stable.
+  // 2. Hoist mid-conversation system messages into the top-level system field.
+  // Anthropic's Messages API accepts system content only at the top level.
   if (Array.isArray(body.messages)) {
     const messages = [];
+    const hoisted = Array.isArray(body.system)
+      ? [...body.system]
+      : typeof body.system === "string" && body.system.trim()
+        ? [{ type: CLAUDE_BLOCK.TEXT, text: body.system }]
+        : [];
     for (const msg of body.messages) {
       if (msg.role !== ROLE.SYSTEM) {
         messages.push(msg);
         continue;
       }
-      const text = typeof msg.content === "string"
-        ? msg.content
+      const blocks = typeof msg.content === "string"
+        ? [{ type: CLAUDE_BLOCK.TEXT, text: msg.content }]
         : Array.isArray(msg.content)
-          ? msg.content.map(b => (typeof b === "string" ? b : b?.text || "")).join("\n")
-          : "";
-      if (!text.trim()) continue;
-
-      // Copy-on-write: the caller's body is reused across account-fallback
-      // attempts, so folding must never mutate the original message.
-      const block = { type: CLAUDE_BLOCK.TEXT, text };
-      const prev = messages[messages.length - 1];
-      if (prev?.role === ROLE.USER) {
-        const content = typeof prev.content === "string"
-          ? [{ type: CLAUDE_BLOCK.TEXT, text: prev.content }]
-          : Array.isArray(prev.content) ? [...prev.content] : [];
-        messages[messages.length - 1] = { ...prev, content: [...content, block] };
-        continue;
-      }
-      messages.push({ role: ROLE.USER, content: [block] });
+          ? msg.content.map((block) => typeof block === "string"
+            ? { type: CLAUDE_BLOCK.TEXT, text: block }
+            : block).filter((block) => block?.text || block?.type === CLAUDE_BLOCK.TEXT)
+          : [];
+      hoisted.push(...blocks);
     }
     body.messages = messages;
+    if (hoisted.length > 0) body.system = hoisted;
   }
 
   // 3. Drop thinking blocks whose signature is not Claude's (combo mixes models,
