@@ -94,18 +94,15 @@ describe("Antigravity executor active runtime wiring", () => {
     expect(JSON.stringify(transportStats())).not.toContain("refresh-account-a-never-visible");
   });
 
-  it("uses the endpoint manager in execute and falls over from daily to production after a bounded transient failure", async () => {
+  it("uses the endpoint manager to select daily and does not cross-fallback after a transient failure", async () => {
     const instance = executor();
-    proxyAwareFetch
-      .mockResolvedValueOnce(response(503, { error: { message: "high traffic" } }))
-      .mockResolvedValueOnce(response(200));
+    proxyAwareFetch.mockResolvedValueOnce(response(503, { error: { message: "high traffic" } }));
 
     const result = await execute(instance, request({ sessionId: "sticky-session" }));
 
-    expect(result.response.status).toBe(200);
+    expect(result.response.status).toBe(503);
     expect(proxyAwareFetch.mock.calls.map(([url]) => url)).toEqual([
       `${DAILY}/v1internal:generateContent`,
-      `${PROD}/v1internal:generateContent`,
     ]);
     expect(instance.endpointManager.snapshot()[DAILY].consecutiveFailures).toBeGreaterThan(0);
   });

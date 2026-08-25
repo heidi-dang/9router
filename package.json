@@ -17,7 +17,7 @@
     "cli:publish": "npm --prefix cli run publish:cli",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:antigravity": "vitest run --config tests/vitest.config.js tests/unit/antigravity-coordinator.test.js tests/unit/antigravity-credits-lifecycle.test.js tests/unit/antigravity-protocol-contract.test.js tests/unit/antigravity-model-routing.test.js tests/unit/antigravity-quota-parser.test.js tests/unit/antigravity-retry-hook.test.js tests/unit/antigravity-stream-options.test.js tests/unit/base-executor-retry.test.js tests/unit/count-tokens.test.js tests/unit/project-id-security.test.js tests/unit/stream-disconnect.test.js",
+    "test:antigravity": "vitest run --config tests/vitest.config.js tests/unit/antigravity-coordinator.test.js tests/unit/antigravity-credits-lifecycle.test.js tests/unit/antigravity-protocol-contract.test.js tests/unit/antigravity-model-routing.test.js tests/unit/antigravity-quota-parser.test.js tests/unit/antigravity-retry-hook.test.js tests/unit/antigravity-runtime-wiring.test.js tests/unit/antigravity-stream-options.test.js tests/unit/base-executor-retry.test.js tests/unit/count-tokens.test.js tests/unit/project-id-security.test.js tests/unit/stream-disconnect.test.js",
     "verify:antigravity": "npm run test:antigravity && npm run build"
   },
   "dependencies": {
