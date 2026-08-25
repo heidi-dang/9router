@@ -1,23 +1,71 @@
+import { opaqueAntigravityIdentity } from "./identity.js";
+
 const cooldowns = new Map();
-const keyOf = (credential, model) => `${credential || "anonymous"}:${model || "*"}`;
+const MAX_COOLDOWNS = 4_000;
+
+function accountOf(input = {}) {
+  return input.accountIdentity || input.credentialId || "anonymous";
+}
+
+function keyOf(accountIdentity, model) {
+  return opaqueAntigravityIdentity("antigravity-cooldown-v1", accountIdentity || "anonymous", model || "*");
+}
+
 export function parseResetAt(value, now = Date.now()) {
   if (value == null) return null;
   const text = String(value).trim();
-  if (/^\d+(\.\d+)?$/.test(text)) { const n = Number(text); return n < 1e11 ? now + n * 1000 : n; }
-  const match = text.match(/(?:(\d+)h)?\s*(?:(\d+)m)?\s*(?:(\d+)s)?/i);
-  if (match && (match[1] || match[2] || match[3])) return now + ((+match[1] || 0) * 3600 + (+match[2] || 0) * 60 + (+match[3] || 0)) * 1000;
-  const date = Date.parse(text); return Number.isFinite(date) && date > now ? date : null;
+  if (/^\d+(\.\d+)?$/.test(text)) {
+    const numeric = Number(text);
+    return numeric < 1e11 ? now + numeric * 1000 : numeric;
+  }
+  const duration = text.match(/(?:(\d+)h)?\s*(?:(\d+)m)?\s*(?:(\d+)s)?/i);
+  if (duration && (duration[1] || duration[2] || duration[3])) {
+    return now + ((Number(duration[1]) || 0) * 3600 + (Number(duration[2]) || 0) * 60 + (Number(duration[3]) || 0)) * 1000;
+  }
+  const date = Date.parse(text);
+  return Number.isFinite(date) && date > now ? date : null;
 }
+
 export function extractCooldownMs(headers, body = "", now = Date.now()) {
   const get = (name) => headers?.get?.(name) ?? headers?.[name] ?? headers?.[name.toLowerCase()];
-  for (const name of ["retry-after", "x-ratelimit-reset-after", "x-quota-reset-after", "x-ratelimit-reset"]) { const at = parseResetAt(get(name), now); if (at) return Math.max(0, at - now); }
+  for (const name of ["retry-after", "x-ratelimit-reset-after", "x-quota-reset-after", "x-ratelimit-reset"]) {
+    const at = parseResetAt(get(name), now);
+    if (at != null) return Math.max(0, at - now);
+  }
   const match = String(body).match(/reset(?:s| after)?[^\d]*(\d+h)?\s*(\d+m)?\s*(\d+s)?/i);
   if (!match || !(match[1] || match[2] || match[3])) return null;
   const resetAt = parseResetAt(`${match[1] || ""}${match[2] || ""}${match[3] || ""}`, now);
   return resetAt == null ? null : Math.max(0, resetAt - now);
 }
-export function setCooldown({ credentialId, model, until, reason = "quota" }) { const key = keyOf(credentialId, model); const value = typeof until === "number" ? until : Date.parse(until); cooldowns.set(key, { until: value, reason }); return cooldowns.get(key); }
-export function getCooldown(credentialId, model, now = Date.now()) { const entries = [cooldowns.get(keyOf(credentialId, model)), cooldowns.get(keyOf(credentialId, null))].filter(Boolean); const active = entries.filter(x => x.until > now).sort((a,b) => b.until-a.until)[0]; if (!active) { cooldowns.delete(keyOf(credentialId, model)); return null; } return active; }
+
+function cleanup(now = Date.now()) {
+  for (const [key, value] of cooldowns) {
+    if (value.until <= now) cooldowns.delete(key);
+  }
+}
+
+export function setCooldown({ accountIdentity, credentialId, model, until, reason = "quota", now = Date.now() }) {
+  const account = accountIdentity || credentialId || "anonymous";
+  const target = typeof until === "number" ? until : Date.parse(until);
+  if (!Number.isFinite(target) || target <= now) return null;
+  cleanup(now);
+  const key = keyOf(account, model);
+  if (!cooldowns.has(key) && cooldowns.size >= MAX_COOLDOWNS) cooldowns.delete(cooldowns.keys().next().value);
+  const value = { until: target, reason, model: model || null, accountIdentity: opaqueAntigravityIdentity("antigravity-cooldown-account", account) };
+  cooldowns.delete(key);
+  cooldowns.set(key, value);
+  return { ...value };
+}
+
+export function getCooldown(accountIdentity, model, now = Date.now()) {
+  cleanup(now);
+  const specific = cooldowns.get(keyOf(accountIdentity, model));
+  const accountWide = cooldowns.get(keyOf(accountIdentity, null));
+  const active = [specific, accountWide].filter(Boolean).sort((left, right) => right.until - left.until)[0];
+  return active ? { ...active } : null;
+}
+
 export const isCoolingDown = (...args) => Boolean(getCooldown(...args));
 export function clearCooldowns() { cooldowns.clear(); }
-export function cooldownKey(credentialId, model) { return keyOf(credentialId, model); }
+export function cooldownStats() { cleanup(); return { size: cooldowns.size }; }
+export function cooldownKey(accountIdentity, model) { return keyOf(accountIdentity, model); }

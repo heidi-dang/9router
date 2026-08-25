@@ -5,21 +5,18 @@ import { OAUTH_ENDPOINTS, ANTIGRAVITY_HEADERS, AG_DEFAULT_TOOLS, AG_TOOL_SUFFIX 
 import { HTTP_STATUS } from "../config/runtimeConfig.js";
 import { resolveSessionId } from "../utils/sessionManager.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
-import { cleanJSONSchemaForAntigravity } from "../translator/formats/gemini.js";
 import { DEFAULT_THINKING_AG_SIGNATURE } from "../config/defaultThinkingSignature.js";
 import { normalizeAntigravityTools } from "../antigravity/tools.js";
-import { classifyAntigravityError } from "../antigravity/errors.js";
-import { extractCooldownMs } from "../antigravity/quota.js";
+import { classifyAntigravityError, AntigravityErrorCode } from "../antigravity/errors.js";
+import { extractCooldownMs, getCooldown, setCooldown } from "../antigravity/quota.js";
+import { getAntigravityTransport } from "../antigravity/transport.js";
+import { AntigravityEndpointManager } from "../antigravity/endpoints.js";
+import { SessionAffinityManager, resolveAntigravitySession } from "../antigravity/sessions.js";
+import { ReasoningStateStore } from "../antigravity/reasoning.js";
+import { antigravityAccountIdentity } from "../antigravity/identity.js";
+import { classifyAntigravityCreditsFailure, withEnabledCreditTypes } from "../antigravity/credits.js";
 
 const refreshFlights = new Map();
-
-// Sanitize function name: Gemini requires [a-zA-Z_][a-zA-Z0-9_.:\-]{0,63}
-function sanitizeFunctionName(name) {
-  if (!name) return "_unknown";
-  let s = name.replace(/[^a-zA-Z0-9_.:\-]/g, "_");
-  if (!/^[a-zA-Z_]/.test(s)) s = "_" + s;
-  return s.substring(0, 64);
-}
 
 const MAX_RETRY_AFTER_MS = 10000;
 const ANTIGRAVITY_TRANSIENT_RETRY_MAX_MS = 15000;
@@ -117,15 +114,22 @@ function buildIdeRequestId({ body, request, credentials, model, requestType }) {
 export class AntigravityExecutor extends BaseExecutor {
   constructor() {
     super("antigravity", PROVIDERS.antigravity);
+    this.endpointManager = new AntigravityEndpointManager(this.getBaseUrls());
+    this.sessionAffinity = new SessionAffinityManager();
+    this.reasoningState = new ReasoningStateStore();
+  }
+
+  buildUrlForBase(baseUrl, model, stream) {
+    const normalized = String(baseUrl || "").replace(/\/$/, "");
+    // Image generation MUST use non-streaming generateContent.
+    const forceNonStream = isImageModel(model);
+    const action = (stream && !forceNonStream) ? "streamGenerateContent?alt=sse" : "generateContent";
+    return `${normalized}/v1internal:${action}`;
   }
 
   buildUrl(model, stream, urlIndex = 0) {
     const baseUrls = this.getBaseUrls();
-    const baseUrl = baseUrls[urlIndex] || baseUrls[0];
-    // Image generation MUST use non-streaming generateContent
-    const forceNonStream = isImageModel(model);
-    const action = (stream && !forceNonStream) ? "streamGenerateContent?alt=sse" : "generateContent";
-    return `${baseUrl}/v1internal:${action}`;
+    return this.buildUrlForBase(baseUrls[urlIndex] || baseUrls[0], model, stream);
   }
 
   // sessionId comes from transformRequest output; base.execute runs transformRequest before
@@ -136,6 +140,92 @@ export class AntigravityExecutor extends BaseExecutor {
       "Authorization": `Bearer ${credentials.accessToken}`,
       "User-Agent": this.config.headers?.["User-Agent"] || ANTIGRAVITY_HEADERS["User-Agent"],
     };
+  }
+
+  shouldRetry(status, urlIndex, fallbackCount) {
+    return this.isTransientAntigravityError(status, "") && urlIndex + 1 < fallbackCount;
+  }
+
+  createExecutionContext({ model, transformedBody, credentials, proxyOptions }) {
+    const accountIdentity = antigravityAccountIdentity(credentials);
+    const sessionKey = resolveAntigravitySession({
+      sessionId: transformedBody?.request?.sessionId,
+      headers: credentials?.rawHeaders,
+      connectionId: accountIdentity,
+      body: transformedBody,
+    });
+    const cooldown = getCooldown(accountIdentity, model);
+    if (cooldown) {
+      throw classifyAntigravityError(429, "Antigravity account is cooling down", {
+        code: AntigravityErrorCode.RATE_LIMITED,
+        retryAfterMs: Math.max(0, cooldown.until - Date.now()),
+      });
+    }
+
+    const reasoningScopes = [];
+    for (const content of transformedBody?.request?.contents || []) {
+      for (const part of content?.parts || []) {
+        if (!part?.functionCall) continue;
+        const toolCallId = part.functionCall.id || part.functionCall.name || "call";
+        const scope = { accountIdentity, sessionKey, model, toolCallId };
+        const previous = this.reasoningState.get(scope);
+        if (previous?.thoughtSignature && (!part.thoughtSignature || part.thoughtSignature === DEFAULT_THINKING_AG_SIGNATURE)) {
+          part.thoughtSignature = previous.thoughtSignature;
+        }
+        if (part.thoughtSignature) this.reasoningState.put(scope, { thoughtSignature: part.thoughtSignature });
+        reasoningScopes.push(scope);
+      }
+    }
+
+    const affinity = this.sessionAffinity.get(sessionKey);
+    return { accountIdentity, sessionKey, affinity, reasoningScopes, proxyOptions };
+  }
+
+  getExecutionUrls({ model, stream, context }) {
+    const preferred = context?.affinity?.endpoint;
+    return this.endpointManager.order({ preferred }).map((baseUrl) => this.buildUrlForBase(baseUrl, model, stream));
+  }
+
+  async fetchRequest(url, options, proxyOptions, context) {
+    const dispatcher = getAntigravityTransport({
+      accountIdentity: context?.accountIdentity,
+      proxyOptions,
+      origin: url,
+    });
+    return proxyAwareFetch(url, { ...options, dispatcher }, proxyOptions);
+  }
+
+  async onResponse({ response, url, model, credentials, context, latencyMs }) {
+    const endpoint = new URL(url).origin;
+    const ok = response?.ok ?? (response?.status >= 200 && response?.status < 400);
+    if (ok) {
+      this.endpointManager.record(endpoint, { ok: true, latencyMs });
+      this.sessionAffinity.bind(context?.sessionKey, { endpoint, accountIdentity: context?.accountIdentity, model });
+      return;
+    }
+
+    let bodyText = "";
+    try { bodyText = await response.clone().text(); } catch { /* response body is optional */ }
+    const classified = classifyAntigravityError(response?.status, bodyText);
+    const creditsDecision = classifyAntigravityCreditsFailure(bodyText);
+    const cooldownMs = extractCooldownMs(response?.headers, bodyText);
+    const shouldCooldown = classified.code === AntigravityErrorCode.RATE_LIMITED || classified.code === AntigravityErrorCode.QUOTA_EXHAUSTED;
+    // Only an upstream-provided reset establishes a cooldown duration. Explicit
+    // credit exhaustion remains visible to callers rather than fabricating a balance or expiry.
+    if (shouldCooldown && cooldownMs && context?.accountIdentity) {
+      setCooldown({ accountIdentity: context.accountIdentity, model, until: Date.now() + cooldownMs, reason: creditsDecision.kind === "credits_exhausted" ? AntigravityErrorCode.CREDITS_EXHAUSTED : classified.code });
+    }
+    if (classified.retryable) {
+      this.endpointManager.record(endpoint, { ok: false, latencyMs, cooldownMs: cooldownMs || 0 });
+    }
+    if (classified.code === AntigravityErrorCode.BAD_THOUGHT_SIGNATURE) {
+      for (const scope of context?.reasoningScopes || []) this.reasoningState.invalidate(scope);
+    }
+  }
+
+  async onRequestError({ error, url }) {
+    const classified = classifyAntigravityError(0, error?.message || "network error");
+    if (classified.retryable) this.endpointManager.record(new URL(url).origin, { ok: false });
   }
 
   transformRequest(model, body, stream, credentials) {
@@ -185,14 +275,14 @@ export class AntigravityExecutor extends BaseExecutor {
         // No tools, no systemInstruction, no safetySettings for image gen
       };
 
-      return {
+      return withEnabledCreditTypes({
         project: projectId,
         model: cleanModel,
         userAgent: "antigravity",
         requestType: "image_gen",
         requestId: buildIdeRequestId({ body, request, credentials, model: cleanModel, requestType: "image_gen" }),
         request,
-      };
+      });
     }
 
     // ─── Standard (non-image) request ───
@@ -268,7 +358,7 @@ export class AntigravityExecutor extends BaseExecutor {
 
     this._lastSessionId = transformedRequest.sessionId; // cached for buildHeaders (base.execute order)
 
-    return {
+    return withEnabledCreditTypes({
       ...body,
       project: projectId,
       model: body.model || model,
@@ -276,12 +366,12 @@ export class AntigravityExecutor extends BaseExecutor {
       requestType: "agent",
       requestId: buildIdeRequestId({ body, request: transformedRequest, credentials, model, requestType: "agent" }),
       request: transformedRequest
-    };
+    });
   }
 
   async refreshCredentials(credentials, log, proxyOptions = null) {
     if (!credentials.refreshToken) return null;
-    const identity = credentials.connectionId || credentials.email || credentials.refreshToken.slice(-16);
+    const identity = antigravityAccountIdentity(credentials);
     if (refreshFlights.has(identity)) return refreshFlights.get(identity);
     const refreshPromise = (async () => {
       try {
@@ -294,70 +384,14 @@ export class AntigravityExecutor extends BaseExecutor {
         const tokens = await response.json();
         log?.info?.("TOKEN", "Antigravity refreshed");
         return { accessToken: tokens.access_token, refreshToken: tokens.refresh_token || credentials.refreshToken, expiresIn: tokens.expires_in, projectId: credentials.projectId };
-      } catch (error) {
-        log?.error?.("TOKEN", `Antigravity refresh error: ${error.message}`);
+      } catch {
+        // Refresh responses can contain provider diagnostics; do not expose them.
+        log?.error?.("TOKEN", "Antigravity refresh failed");
         return null;
       }
     })();
     refreshFlights.set(identity, refreshPromise);
     try { return await refreshPromise; } finally { refreshFlights.delete(identity); }
-  }
-
-  generateProjectId() {
-    const adj = ["useful", "bright", "swift", "calm", "bold"][Math.floor(Math.random() * 5)];
-    const noun = ["fuze", "wave", "spark", "flow", "core"][Math.floor(Math.random() * 5)];
-    return `${adj}-${noun}-${crypto.randomUUID().slice(0, 5)}`;
-  }
-
-  generateSessionId() {
-    return crypto.randomUUID() + Date.now().toString();
-  }
-
-  parseRetryHeaders(headers) {
-    if (!headers?.get) return null;
-
-    const retryAfter = headers.get('retry-after');
-    if (retryAfter) {
-      const seconds = parseInt(retryAfter, 10);
-      if (!isNaN(seconds) && seconds > 0) return seconds * 1000;
-
-      const date = new Date(retryAfter);
-      if (!isNaN(date.getTime())) {
-        const diff = date.getTime() - Date.now();
-        return diff > 0 ? diff : null;
-      }
-    }
-
-    const resetAfter = headers.get('x-ratelimit-reset-after');
-    if (resetAfter) {
-      const seconds = parseInt(resetAfter, 10);
-      if (!isNaN(seconds) && seconds > 0) return seconds * 1000;
-    }
-
-    const resetTimestamp = headers.get('x-ratelimit-reset');
-    if (resetTimestamp) {
-      const ts = parseInt(resetTimestamp, 10) * 1000;
-      const diff = ts - Date.now();
-      return diff > 0 ? diff : null;
-    }
-
-    return null;
-  }
-
-  // Parse retry time from Antigravity error message body
-  // Format: "Your quota will reset after 2h7m23s" or "1h30m" or "45m" or "30s"
-  parseRetryFromErrorMessage(errorMessage) {
-    if (!errorMessage || typeof errorMessage !== "string") return null;
-
-    const match = errorMessage.match(/reset after (\d+h)?(\d+m)?(\d+s)?/i);
-    if (!match) return null;
-
-    let totalMs = 0;
-    if (match[1]) totalMs += parseInt(match[1]) * 3600 * 1000; // hours
-    if (match[2]) totalMs += parseInt(match[2]) * 60 * 1000; // minutes
-    if (match[3]) totalMs += parseInt(match[3]) * 1000; // seconds
-
-    return totalMs > 0 ? totalMs : null;
   }
 
   extractErrorMessage(errorJson, bodyText = "") {
@@ -381,7 +415,6 @@ export class AntigravityExecutor extends BaseExecutor {
   async computeRetryDelay(response, attempt) {
     let bodyText = "";
     let errorJson = null;
-    let retryMs = this.parseRetryHeaders(response.headers);
 
     try {
       bodyText = await response.clone().text();
@@ -391,10 +424,11 @@ export class AntigravityExecutor extends BaseExecutor {
     }
 
     const errorMessage = this.extractErrorMessage(errorJson, bodyText);
-
-    if (!retryMs) {
-      retryMs = this.parseRetryFromErrorMessage(errorMessage);
-    }
+    const creditsDecision = classifyAntigravityCreditsFailure(bodyText);
+    // Explicit quota/credits exhaustion is deterministic for this account and
+    // must not be hammered as a generic transient 429.
+    if (["credits_exhausted", "quota_exhausted"].includes(creditsDecision.kind)) return false;
+    const retryMs = extractCooldownMs(response.headers, errorMessage);
     if (retryMs) return retryMs <= MAX_RETRY_AFTER_MS ? retryMs : false;
 
     if (!this.isTransientAntigravityError(response.status, errorMessage)) return false;

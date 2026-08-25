@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import {
   getRefreshLeadMs,
   isUnrecoverableRefreshError,
@@ -121,14 +122,17 @@ export function mergeRefreshedCredentials(provider, currentCredentials, refreshe
 }
 
 function getRefreshLockKey(provider, credentials) {
-  const stableId =
+  const durableId =
     credentials?.connectionId ||
     credentials?.id ||
     credentials?.email ||
     credentials?.name ||
-    credentials?.refreshToken?.slice?.(-16) ||
     "default";
-  return `${provider}:${stableId}`;
+  // Last-resort token material is hashed before entering the process-local map.
+  // The resulting key is opaque and is never emitted to logs or diagnostics.
+  const fallback = durableId === "default" ? credentials?.refreshToken || credentials?.accessToken || "default" : durableId;
+  const opaque = crypto.createHash("sha256").update(`${provider}\u0000${fallback}`).digest("hex");
+  return `${provider}:${opaque}`;
 }
 
 export async function withCredentialRefreshLock(provider, credentials, refreshFn) {

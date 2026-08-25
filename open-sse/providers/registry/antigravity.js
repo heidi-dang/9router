@@ -19,14 +19,17 @@ export default {
   category: "oauth",
   serviceKinds: ["llm", "image"],
   transport: {
-    baseUrls: [ANTIGRAVITY_IDE_BASE_URL],
+    // Chat traffic prefers the IDE daily endpoint and fails over to production.
+    // Discovery/quota APIs remain explicitly configured on production below.
+    baseUrls: [ANTIGRAVITY_IDE_BASE_URL, "https://cloudcode-pa.googleapis.com"],
     format: "antigravity",
     headers: {
       "User-Agent": ANTIGRAVITY_IDE_USER_AGENT,
     },
     retry: {
+      // Six bounded 429 retries preserves the existing executor contract.
       "429": {
-        attempts: 3,
+        attempts: 6,
       },
       "500": {
         attempts: 3,
@@ -61,6 +64,7 @@ export default {
     { id: "claude-opus-4-6-thinking", name: "Claude Opus 4.6 (Thinking)" },
     { id: "gpt-oss-120b-medium", name: "GPT-OSS 120B (Medium)" },
     { id: "gemini-3-flash", name: "Gemini 3 Flash", thinking: false },
+    { id: "gemini-3.1-flash-lite", name: "Gemini 3.1 Flash Lite", capabilities: ["vision", "audio", "video"] },
     // Image generation models
     { id: "gemini-3.1-flash-image", name: "Gemini 3.1 Flash (Image)", kind: "image", imageGen: true, capabilities: ["textToImage"] },
   ],
