@@ -59,8 +59,12 @@ describe("Gemini Cloud Code endpoint isolation", () => {
       "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist",
       expect.objectContaining({ method: "POST" })
     );
-    // Chat transport still uses the daily host to bypass prod 429.
-    expect(antigravity.transport.baseUrls).toEqual(["https://daily-cloudcode-pa.googleapis.com"]);
+    // Chat transport prefers the daily host to bypass prod 429 and retains
+    // production as an explicit bounded fallback for transient failures.
+    expect(antigravity.transport.baseUrls).toEqual([
+      "https://daily-cloudcode-pa.googleapis.com",
+      "https://cloudcode-pa.googleapis.com",
+    ]);
     removeConnection(connectionId);
   });
 });

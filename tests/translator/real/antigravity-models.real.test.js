@@ -22,6 +22,7 @@ const AG_MODELS = [
   "ag/claude-opus-4-6-thinking",
   "ag/gpt-oss-120b-medium",
   "ag/gemini-3-flash",
+  "ag/gemini-3.1-flash-lite",
 ];
 
 // Simple text prompt — no tools
