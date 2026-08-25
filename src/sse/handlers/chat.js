@@ -22,6 +22,7 @@ import { detectFormatByEndpoint } from "open-sse/translator/formats.js";
 import * as log from "../utils/logger.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
 import { getProjectIdForConnection } from "open-sse/services/projectId.js";
+import { getAntigravityCoordinator } from "../services/antigravityCoordinator.js";
 
 /**
  * Handle chat completion request
@@ -219,50 +220,18 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
   // Extract userAgent from request
   const userAgent = request?.headers?.get("user-agent") || "";
 
-  // Try with available accounts (fallback on errors)
-  const excludeConnectionIds = new Set();
-  let lastError = null;
-  let lastStatus = null;
+  const chatSettings = await getSettings();
+  const providerThinking = (chatSettings.providerThinking || {})[provider] || null;
+  const pxpipeTransform = chatSettings.pxpipeEnabled ? await getPxpipeTransform() : null;
+  const sourceFormatOverride = request?.url
+    ? detectFormatByEndpoint(new URL(request.url).pathname, body)
+    : null;
 
-  while (true) {
-    const credentials = await getProviderCredentials(provider, excludeConnectionIds, model);
-
-    // All accounts unavailable
-    if (!credentials || credentials.allRateLimited) {
-      if (credentials?.allRateLimited) {
-        const errorMsg = lastError || credentials.lastError || "Unavailable";
-        const status = lastStatus || Number(credentials.lastErrorCode) || HTTP_STATUS.SERVICE_UNAVAILABLE;
-        log.warn("CHAT", `[${provider}/${model}] ${errorMsg} (${credentials.retryAfterHuman})`);
-        return unavailableResponse(status, `[${provider}/${model}] ${errorMsg}`, credentials.retryAfter, credentials.retryAfterHuman);
-      }
-      if (excludeConnectionIds.size === 0) {
-        log.warn("AUTH", `No active credentials for provider: ${provider}`);
-        return errorResponse(HTTP_STATUS.NOT_FOUND, `No active credentials for provider: ${provider}`);
-      }
-      log.warn("CHAT", "No more accounts available", { provider });
-      return errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable");
-    }
-
-    // Account selection shown in the unified "▶" line (acc:...)
-    const refreshedCredentials = await checkAndRefreshToken(provider, credentials);
-
-    // Ensure real project ID is available for providers that need it (P0 fix: cold miss)
-    if ((provider === "antigravity" || provider === "gemini-cli") && !refreshedCredentials.projectId) {
-      const pid = await getProjectIdForConnection(credentials.connectionId, refreshedCredentials.accessToken, provider);
-      if (pid) {
-        refreshedCredentials.projectId = pid;
-        // Persist to DB in background so subsequent requests have it immediately
-        updateProviderCredentials(credentials.connectionId, { projectId: pid }).catch(() => { });
-      }
-    }
-
-    // Use shared chatCore
-    const chatSettings = await getSettings();
-    const providerThinking = (chatSettings.providerThinking || {})[provider] || null;
-    const result = await handleChatCore({
+  const executeCoreAttempt = async (credentials, connection, { coordinated = false, upstreamAttemptBudget = null } = {}) => {
+    return handleChatCore({
       body: { ...body, model: `${provider}/${model}` },
       modelInfo: { provider, model },
-      credentials: refreshedCredentials,
+      credentials,
       log,
       clientRawRequest,
       connectionId: credentials.connectionId,
@@ -280,29 +249,76 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       pxpipeEnabled: !!chatSettings.pxpipeEnabled,
       pxpipeMinChars: chatSettings.pxpipeMinChars,
       pxpipeTimeoutMs: chatSettings.pxpipeTimeoutMs,
-      // Lazily warms the in-process module on first use; null when not installed (fail-open)
-      pxpipeTransform: chatSettings.pxpipeEnabled ? await getPxpipeTransform() : null,
+      pxpipeTransform,
       onPxpipeEvent: appendPxpipeEvent,
       providerThinking,
-      // Detect source format by endpoint + body
-      sourceFormatOverride: request?.url ? detectFormatByEndpoint(new URL(request.url).pathname, body) : null,
+      sourceFormatOverride,
+      upstreamAttemptBudget,
       onCredentialsRefreshed: async (newCreds) => {
         await updateProviderCredentials(credentials.connectionId, {
           ...newCreds,
-          existingProviderSpecificData: credentials.providerSpecificData,
+          existingProviderSpecificData: connection?.providerSpecificData || credentials.providerSpecificData,
           testStatus: "active"
         });
       },
-      onRequestSuccess: async () => {
-        await clearAccountError(credentials.connectionId, credentials, model);
-      }
+      onRequestSuccess: coordinated
+        ? undefined
+        : async () => clearAccountError(credentials.connectionId, credentials, model)
     });
+  };
 
+  // Antigravity owns candidate selection and all account transitions. This path
+  // deliberately runs before the legacy selector returns a credential.
+  if (provider === "antigravity") {
+    const outcome = await getAntigravityCoordinator().execute({
+      model,
+      body,
+      headers: clientRawRequest?.headers || {},
+      signal: request?.signal,
+      invokeAttempt: ({ credentials, connection }) => executeCoreAttempt(credentials, connection, { coordinated: true, upstreamAttemptBudget: 2 })
+    });
+    if (outcome?.response) return outcome.response;
+    return errorResponse(
+      outcome?.status || HTTP_STATUS.SERVICE_UNAVAILABLE,
+      outcome?.error || "No eligible Antigravity accounts",
+      outcome?.resetsAtMs
+    );
+  }
+
+  // Legacy provider-selection lifecycle. Antigravity intentionally bypasses it.
+  const excludeConnectionIds = new Set();
+  let lastError = null;
+  let lastStatus = null;
+  while (true) {
+    const credentials = await getProviderCredentials(provider, excludeConnectionIds, model);
+    if (!credentials || credentials.allRateLimited) {
+      if (credentials?.allRateLimited) {
+        const errorMsg = lastError || credentials.lastError || "Unavailable";
+        const status = lastStatus || Number(credentials.lastErrorCode) || HTTP_STATUS.SERVICE_UNAVAILABLE;
+        log.warn("CHAT", `[${provider}/${model}] ${errorMsg} (${credentials.retryAfterHuman})`);
+        return unavailableResponse(status, `[${provider}/${model}] ${errorMsg}`, credentials.retryAfter, credentials.retryAfterHuman);
+      }
+      if (excludeConnectionIds.size === 0) {
+        log.warn("AUTH", `No active credentials for provider: ${provider}`);
+        return errorResponse(HTTP_STATUS.NOT_FOUND, `No active credentials for provider: ${provider}`);
+      }
+      log.warn("CHAT", "No more accounts available", { provider });
+      return errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable");
+    }
+
+    const refreshedCredentials = await checkAndRefreshToken(provider, credentials);
+    if (provider === "gemini-cli" && !refreshedCredentials.projectId) {
+      const pid = await getProjectIdForConnection(credentials.connectionId, refreshedCredentials.accessToken, provider);
+      if (pid) {
+        refreshedCredentials.projectId = pid;
+        updateProviderCredentials(credentials.connectionId, { projectId: pid }).catch(() => {});
+      }
+    }
+
+    const result = await executeCoreAttempt(refreshedCredentials, credentials);
     if (result.success) return result.response;
 
-    // Mark account unavailable (auto-calculates cooldown with exponential backoff, or precise resetsAtMs)
     const { shouldFallback } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model, result.resetsAtMs);
-
     if (shouldFallback) {
       log.warn("FALLBACK", `⇄ ACC:${credentials.connectionName} UNAVAILABLE (${result.status}) → NEXT ACCOUNT`);
       excludeConnectionIds.add(credentials.connectionId);
@@ -310,7 +326,6 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       lastStatus = result.status;
       continue;
     }
-
     return result.response;
   }
 }

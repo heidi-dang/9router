@@ -7,7 +7,16 @@
  * This significantly reduces the risk of being flagged by Google's anti-abuse systems.
  */
 
+import crypto from "crypto";
 import { CLOUD_CODE_API, LOAD_CODE_ASSIST_HEADERS, ANTIGRAVITY_LOAD_CODE_ASSIST_HEADERS, LOAD_CODE_ASSIST_METADATA } from "../config/appConstants.js";
+
+function opaqueConnectionKey(connectionId) {
+    return crypto.createHash("sha256").update(`project-state:${String(connectionId || "")}`).digest("hex");
+}
+
+function safeConnectionLabel(connectionId) {
+    return opaqueConnectionKey(connectionId).slice(0, 12);
+}
 
 // ─── Cache ────────────────────────────────────────────────────────────────────
 // connectionId -> { projectId: string, fetchedAt: number }
@@ -86,15 +95,16 @@ startCacheCleanup();
 export async function getProjectIdForConnection(connectionId, accessToken, provider = "gemini-cli") {
     if (!connectionId || !accessToken) return null;
 
+    const cacheKey = opaqueConnectionKey(connectionId);
     // Return cached value if still fresh
-    const cached = projectIdCache.get(connectionId);
+    const cached = projectIdCache.get(cacheKey);
     if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
         return cached.projectId;
     }
 
     // Deduplicate concurrent fetches for the same connection
-    if (pendingFetches.has(connectionId)) {
-        return pendingFetches.get(connectionId).promise;
+    if (pendingFetches.has(cacheKey)) {
+        return pendingFetches.get(cacheKey).promise;
     }
 
     // Each fetch gets its own AbortController so it can be canceled via removeConnection()
@@ -104,20 +114,20 @@ export async function getProjectIdForConnection(connectionId, accessToken, provi
         try {
             const projectId = await fetchProjectId(accessToken, controller.signal, provider);
             if (projectId) {
-                projectIdCache.set(connectionId, {projectId, fetchedAt: Date.now()});
+                projectIdCache.set(cacheKey, {projectId, fetchedAt: Date.now()});
                 return projectId;
             }
-            console.warn("[ProjectId] could not fetch projectId for connection", connectionId.slice(0, 8));
+            console.warn("[ProjectId] could not fetch projectId for connection", safeConnectionLabel(connectionId));
             return null;
         } catch (error) {
-            console.warn(`[ProjectId] Error fetching project ID: ${error.message}`);
+            console.warn("[ProjectId] Error fetching project ID", { category: error?.name || "Error" });
             return null;
         } finally {
-            pendingFetches.delete(connectionId);
+            pendingFetches.delete(cacheKey);
         }
     })();
 
-    pendingFetches.set(connectionId, {promise, controller, startedAt: Date.now()});
+    pendingFetches.set(cacheKey, {promise, controller, startedAt: Date.now()});
     return promise;
 }
 
@@ -126,7 +136,7 @@ export async function getProjectIdForConnection(connectionId, accessToken, provi
  * Call this when a connection's credentials are fully revoked or refreshed.
  */
 export function invalidateProjectId(connectionId) {
-    projectIdCache.delete(connectionId);
+    projectIdCache.delete(opaqueConnectionKey(connectionId));
 }
 
 /**
@@ -137,11 +147,12 @@ export function invalidateProjectId(connectionId) {
  */
 export function removeConnection(connectionId) {
     if (!connectionId) return;
-    projectIdCache.delete(connectionId);
-    const pending = pendingFetches.get(connectionId);
+    const cacheKey = opaqueConnectionKey(connectionId);
+    projectIdCache.delete(cacheKey);
+    const pending = pendingFetches.get(cacheKey);
     if (pending) {
         try { pending.controller.abort(); } catch (_) { /* ignore */ }
-        pendingFetches.delete(connectionId);
+        pendingFetches.delete(cacheKey);
     }
 }
 
@@ -166,8 +177,8 @@ async function fetchProjectId(accessToken, signal, provider) {
     });
 
     if (!response.ok) {
-        const errorText = await response.text().catch(() => "");
-        throw new Error(`loadCodeAssist failed: HTTP ${response.status} ${errorText.slice(0, 200)}`);
+        await response.text().catch(() => "");
+        throw new Error(`loadCodeAssist failed: HTTP ${response.status}`);
     }
 
     const data = await response.json();
@@ -199,7 +210,7 @@ async function fetchProjectId(accessToken, signal, provider) {
  * @returns {Promise<string|null>}
  */
 async function onboardUser(accessToken, tierID, externalSignal, endpoints, provider) {
-    console.log(`[ProjectId] Onboarding user with tier: ${tierID}`);
+    console.log("[ProjectId] Onboarding user", { tierConfigured: Boolean(tierID) });
 
     const reqBody = { tierId: tierID, metadata: LOAD_CODE_ASSIST_METADATA };
     const headers = provider === "antigravity" ? ANTIGRAVITY_LOAD_CODE_ASSIST_HEADERS : LOAD_CODE_ASSIST_HEADERS;
@@ -226,8 +237,8 @@ async function onboardUser(accessToken, tierID, externalSignal, endpoints, provi
             clearTimeout(timeoutId);
 
             if (!response.ok) {
-                const errorText = await response.text().catch(() => "");
-                throw new Error(`onboardUser HTTP ${response.status}: ${errorText.slice(0, 200)}`);
+                await response.text().catch(() => "");
+                throw new Error(`onboardUser HTTP ${response.status}`);
             }
 
             const data = await response.json();
@@ -235,7 +246,7 @@ async function onboardUser(accessToken, tierID, externalSignal, endpoints, provi
             if (data.done === true) {
                 const projectId = extractProjectIdFromOnboard(data);
                 if (projectId) {
-                    console.log(`[ProjectId] Successfully onboarded, project ID: ${projectId}`);
+                    console.log("[ProjectId] Successfully onboarded");
                     return projectId;
                 }
                 throw new Error("onboardUser done but no project_id in response");

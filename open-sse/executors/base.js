@@ -5,6 +5,30 @@ import { dbg } from "../utils/debugLog.js";
 import { ANTHROPIC_API_VERSION, OPENAI_COMPAT_BASE, ANTHROPIC_COMPAT_BASE } from "../providers/shared.js";
 import { resolveOpenAICompatibleApiType } from "../services/provider.js";
 
+function abortError(reason = "Request aborted") {
+  const error = new Error(reason);
+  error.name = "AbortError";
+  return error;
+}
+
+function waitForRetry(delayMs, signal) {
+  if (!signal) return new Promise((resolve) => setTimeout(resolve, delayMs));
+  if (signal.aborted) return Promise.reject(abortError());
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(done, delayMs);
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      reject(abortError());
+    };
+    function done() {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 /**
  * BaseExecutor - shared provider execution flow. Providers can specialize
  * request transport and endpoint selection through the hooks below while the
@@ -85,9 +109,10 @@ export class BaseExecutor {
   /** Provider hook: record non-abort network errors without changing error semantics. */
   async onRequestError(_event) {}
 
-  async execute({ model, body, stream, credentials, signal, log, proxyOptions = null }) {
+  async execute({ model, body, stream, credentials, signal, log, proxyOptions = null, maxUpstreamAttempts = null }) {
     let lastError = null;
     let lastStatus = 0;
+    let upstreamAttempts = 0;
     const retryAttemptsByUrl = {};
     const retryConfig = { ...DEFAULT_RETRY_CONFIG, ...this.config.retry };
     const transformedBody = this.transformRequest(model, body, stream, credentials);
@@ -97,6 +122,7 @@ export class BaseExecutor {
 
     const tryRetry = async (urlIndex, statusKey, reason, response = null) => {
       const { attempts, delayMs } = resolveRetryEntry(retryConfig[statusKey]);
+      if (Number.isFinite(maxUpstreamAttempts) && upstreamAttempts >= maxUpstreamAttempts) return false;
       if (attempts <= 0 || retryAttemptsByUrl[urlIndex] >= attempts) return false;
       let waitMs = delayMs;
       if (response && this.computeRetryDelay) {
@@ -106,7 +132,7 @@ export class BaseExecutor {
       }
       retryAttemptsByUrl[urlIndex]++;
       log?.debug?.("RETRY", `${reason} retry ${retryAttemptsByUrl[urlIndex]}/${attempts} after ${waitMs / 1000}s`);
-      await new Promise((resolve) => setTimeout(resolve, waitMs));
+      await waitForRetry(waitMs, signal);
       return true;
     };
 
@@ -120,6 +146,12 @@ export class BaseExecutor {
       const mergedSignal = signal ? AbortSignal.any([signal, connectCtrl.signal]) : connectCtrl.signal;
 
       try {
+        if (Number.isFinite(maxUpstreamAttempts) && upstreamAttempts >= maxUpstreamAttempts) {
+          const error = new Error(`Upstream attempt budget exhausted (${maxUpstreamAttempts})`);
+          error.code = "UPSTREAM_ATTEMPT_BUDGET_EXHAUSTED";
+          throw error;
+        }
+        upstreamAttempts += 1;
         const bodyStr = JSON.stringify(transformedBody);
         const fetchT0 = Date.now();
         dbg("FETCH", `${this.provider.toUpperCase()} → ${url} | body=${bodyStr.length}B | connectTimeout=${timeoutMs}ms`);

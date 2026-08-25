@@ -2,6 +2,7 @@ import { opaqueAntigravityIdentity } from "./identity.js";
 
 const cooldowns = new Map();
 const MAX_COOLDOWNS = 4_000;
+export const MAX_ANTIGRAVITY_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 
 function accountOf(input = {}) {
   return input.accountIdentity || input.credentialId || "anonymous";
@@ -14,11 +15,13 @@ function keyOf(accountIdentity, model) {
 export function parseResetAt(value, now = Date.now()) {
   if (value == null) return null;
   const text = String(value).trim();
+  if (!text) return null;
   if (/^\d+(\.\d+)?$/.test(text)) {
     const numeric = Number(text);
-    return numeric < 1e11 ? now + numeric * 1000 : numeric;
+    const target = numeric < 1e11 ? now + numeric * 1000 : numeric;
+    return Number.isFinite(target) && target > now ? target : null;
   }
-  const duration = text.match(/(?:(\d+)h)?\s*(?:(\d+)m)?\s*(?:(\d+)s)?/i);
+  const duration = text.match(/^(?:(\d+)h)?\s*(?:(\d+)m)?\s*(?:(\d+)s)?$/i);
   if (duration && (duration[1] || duration[2] || duration[3])) {
     return now + ((Number(duration[1]) || 0) * 3600 + (Number(duration[2]) || 0) * 60 + (Number(duration[3]) || 0)) * 1000;
   }
@@ -30,12 +33,12 @@ export function extractCooldownMs(headers, body = "", now = Date.now()) {
   const get = (name) => headers?.get?.(name) ?? headers?.[name] ?? headers?.[name.toLowerCase()];
   for (const name of ["retry-after", "x-ratelimit-reset-after", "x-quota-reset-after", "x-ratelimit-reset"]) {
     const at = parseResetAt(get(name), now);
-    if (at != null) return Math.max(0, at - now);
+    if (at != null) return Math.min(MAX_ANTIGRAVITY_COOLDOWN_MS, Math.max(0, at - now));
   }
   const match = String(body).match(/reset(?:s| after)?[^\d]*(\d+h)?\s*(\d+m)?\s*(\d+s)?/i);
   if (!match || !(match[1] || match[2] || match[3])) return null;
   const resetAt = parseResetAt(`${match[1] || ""}${match[2] || ""}${match[3] || ""}`, now);
-  return resetAt == null ? null : Math.max(0, resetAt - now);
+  return resetAt == null ? null : Math.min(MAX_ANTIGRAVITY_COOLDOWN_MS, Math.max(0, resetAt - now));
 }
 
 function cleanup(now = Date.now()) {

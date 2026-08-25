@@ -1,11 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { POST } from "../../src/app/api/v1/messages/count_tokens/route.js";
+vi.mock("@/lib/localDb", () => ({
+  validateApiKey: vi.fn(async (key) => key === "test-route-key"),
+}));
+
+import { POST, buildAntigravityCountTokensPayload } from "../../src/app/api/v1/messages/count_tokens/route.js";
 
 async function countTokens(body) {
   const response = await POST(new Request("https://9router.local/v1/messages/count_tokens", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "x-api-key": "test-route-key" },
     body: JSON.stringify(body),
   }));
 
@@ -14,6 +18,36 @@ async function countTokens(body) {
 }
 
 describe("Anthropic count_tokens estimator", () => {
+  it("rejects unauthenticated public count-token requests", async () => {
+    const response = await POST(new Request("https://9router.local/v1/messages/count_tokens", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ messages: [] }),
+    }));
+    expect(response.status).toBe(401);
+    expect((await response.json()).error.type).toBe("authentication_error");
+  });
+
+  it("builds an Antigravity-native countTokens payload through the canonical translator", () => {
+    const payload = buildAntigravityCountTokensPayload({
+      model: "gemini-3.1-flash-lite",
+      system: "You are concise.",
+      messages: [{ role: "user", content: "count this" }],
+      tools: [{ name: "lookup", description: "Lookup", input_schema: { type: "object", properties: {} } }],
+    }, "gemini-3.1-flash-lite", {
+      projectId: "project-test",
+      connectionId: "connection-test",
+      accessToken: "token-test",
+      rawHeaders: {},
+    });
+
+    expect(payload).not.toHaveProperty("project");
+    expect(payload).not.toHaveProperty("model");
+    expect(payload.request).toBeTruthy();
+    expect(payload.request).not.toHaveProperty("safetySettings");
+    expect(Array.isArray(payload.request.contents)).toBe(true);
+  });
+
   it("preserves the existing plain text estimate", async () => {
     const result = await countTokens({
       messages: [

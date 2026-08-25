@@ -19,7 +19,7 @@ export default {
   category: "oauth",
   serviceKinds: ["llm", "image"],
   transport: {
-    // Chat traffic prefers the IDE daily endpoint and fails over to production.
+    // Chat traffic health-selects one endpoint per request; it must not cross-fallback after dispatch.
     // Discovery/quota APIs remain explicitly configured on production below.
     baseUrls: [ANTIGRAVITY_IDE_BASE_URL, "https://cloudcode-pa.googleapis.com"],
     format: "antigravity",

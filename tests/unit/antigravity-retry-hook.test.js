@@ -67,11 +67,15 @@ describe("antigravity computeRetryDelay hook (D3)", () => {
     expect(out.request.tools[0].functionDeclarations.map(fn => fn.name)).toEqual(["read_file"]);
   });
 
-  it("registry prefers the daily IDE host and retains the production fallback", () => {
+  it("keeps endpoint candidates for health selection but dispatches a request to only one endpoint", () => {
     expect(antigravity.transport.baseUrls).toEqual([
       "https://daily-cloudcode-pa.googleapis.com",
       "https://cloudcode-pa.googleapis.com",
     ]);
+    expect(ag.getExecutionUrls({ model: "gemini-3-flash", stream: true, context: null })).toEqual([
+      "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse",
+    ]);
+    expect(ag.shouldRetry(503, 0, 2)).toBe(false);
     expect(antigravity.transport.headers["User-Agent"]).toBe("antigravity/ide/2.1.1 darwin/arm64");
   });
 

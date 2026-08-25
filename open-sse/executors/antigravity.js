@@ -142,8 +142,12 @@ export class AntigravityExecutor extends BaseExecutor {
     };
   }
 
-  shouldRetry(status, urlIndex, fallbackCount) {
-    return this.isTransientAntigravityError(status, "") && urlIndex + 1 < fallbackCount;
+  // Retry policy is handled by computeRetryDelay on the selected endpoint.
+  // The official runtime deliberately forbids switching a generation request to
+  // another endpoint after dispatch, because endpoint changes can break session
+  // continuity and make a partially accepted request unsafe to replay.
+  shouldRetry() {
+    return false;
   }
 
   createExecutionContext({ model, transformedBody, credentials, proxyOptions }) {
@@ -183,7 +187,8 @@ export class AntigravityExecutor extends BaseExecutor {
 
   getExecutionUrls({ model, stream, context }) {
     const preferred = context?.affinity?.endpoint;
-    return this.endpointManager.order({ preferred }).map((baseUrl) => this.buildUrlForBase(baseUrl, model, stream));
+    const selectedBaseUrl = this.endpointManager.order({ preferred })[0];
+    return selectedBaseUrl ? [this.buildUrlForBase(selectedBaseUrl, model, stream)] : [];
   }
 
   async fetchRequest(url, options, proxyOptions, context) {

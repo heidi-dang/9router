@@ -45,6 +45,21 @@ describe("BaseExecutor.execute — retry by status (config-driven)", () => {
   });
 });
 
+describe("BaseExecutor.execute — global upstream attempt budget", () => {
+  it("caps retries and endpoint fallback at the supplied total dispatch budget", async () => {
+    const ex = makeExec({
+      baseUrls: ["https://a/api", "https://b/api"],
+      retry: { 502: { attempts: 5, delayMs: 0 } },
+    });
+    fetchMock.mockResolvedValue(res(502));
+    const out = await ex.execute({
+      model: "m", body: {}, stream: false, credentials: creds, maxUpstreamAttempts: 2,
+    });
+    expect(out.response.status).toBe(502);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("BaseExecutor.execute — baseUrls fallback", () => {
   it("falls over to the next url on 429 (shouldRetry)", async () => {
     const ex = makeExec({ baseUrls: ["https://a/api", "https://b/api"], retry: { 429: { attempts: 0 } } });
@@ -80,6 +95,18 @@ describe("BaseExecutor.execute — network error retry/fallback", () => {
       thrown = e;
     }
     expect(thrown?.message).toBe("boom");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("BaseExecutor.execute — cancellation", () => {
+  it("aborts retry backoff without issuing another upstream request", async () => {
+    const ex = makeExec({ baseUrl: "https://x/api", retry: { 502: { attempts: 2, delayMs: 1_000 } } });
+    const controller = new AbortController();
+    fetchMock.mockResolvedValue(res(502));
+    const pending = ex.execute({ model: "m", body: {}, stream: false, credentials: creds, signal: controller.signal });
+    setTimeout(() => controller.abort(), 5);
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
